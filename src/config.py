@@ -41,10 +41,10 @@ class DBConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = os.getenv("LLM_PROVIDER", "anthropic")
-    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    model: str = os.getenv("LLM_MODEL", "claude-sonnet-4-5-20250929")
+    provider: str = os.getenv("LLM_PROVIDER", "openai_compatible")
+    base_url: str = os.getenv("LLM_BASE_URL", "https://nitec-ai.kz/api")
+    api_key: str = os.getenv("LLM_API_KEY", "")
+    model: str = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
     max_tokens: int = 4096
     temperature: float = 0.0  # детерминированные ответы для воспроизводимости
 
