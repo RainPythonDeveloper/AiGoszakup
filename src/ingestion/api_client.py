@@ -153,11 +153,11 @@ class GoszakupClient:
 
     # === Готовые запросы для каждой сущности ===
 
-    async def fetch_announcements(self, customer_bin: str | None = None, after: int | None = None, max_records: int | None = None) -> list[dict]:
-        """Загружает объявления о закупках."""
+    async def fetch_announcements(self, org_bin: str | None = None, after: int | None = None, max_records: int | None = None) -> list[dict]:
+        """Загружает объявления о закупках (фильтр по orgBin)."""
         filter_clause = ""
-        if customer_bin:
-            filter_clause = f', filter: {{customerBin: "{customer_bin}"}}'
+        if org_bin:
+            filter_clause = f', filter: {{orgBin: "{org_bin}"}}'
 
         query = """
         query($limit: Int, $after: Int) {
@@ -215,11 +215,12 @@ class GoszakupClient:
                 faktTradeMethodsId faktSum
                 deleted lastUpdateDate indexDate systemId
                 ContractUnits {
-                    id lotId planId itemPrice itemQuantity
-                    unitPrice unitQuantity
-                    refUnitCode
-                    ContractUnitPlans {
-                        refEnstruCode descRu katoCode
+                    id lotId plnPointId itemPrice quantity totalSum
+                    contractSum factSum
+                    deleted trdBuyId systemId
+                    Plans {
+                        refEnstruCode descRu nameRu
+                        PlansKato { refKatoCode }
                     }
                 }
             }
@@ -241,7 +242,7 @@ class GoszakupClient:
                 plnPointYear refTradeMethodsId refSubjectTypeId
                 refEnstruCode refMonthsId refPlnPointStatusId
                 refFinsourceId isDeleted dateCreate timestamp indexDate systemId
-                PlansKato { katoCode }
+                PlansKato { refKatoCode }
             }
         }
         """
@@ -285,23 +286,40 @@ class GoszakupClient:
 
     # === REST API для справочников ===
 
-    async def _fetch_rest_paginated(self, endpoint: str) -> list[dict]:
+    async def _fetch_rest_paginated(self, endpoint: str, max_pages: int = 500) -> list[dict]:
         """Загружает справочник через REST с пагинацией."""
         client = await self._get_client()
         all_items = []
         url = f"{api_config.base_url}{endpoint}"
+        prev_url = None
+        page = 0
 
-        while url:
+        while url and page < max_pages:
+            # Защита от бесконечного цикла: если URL не меняется, выходим
+            if url == prev_url:
+                logger.warning(f"[REST {endpoint}] Pagination loop detected, stopping")
+                break
+            prev_url = url
+
             await self.rate_limiter.acquire()
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.json()
 
             items = data.get("items", [])
+            if not items:
+                break
             all_items.extend(items)
+            page += 1
 
             next_page = data.get("next_page", "")
-            url = next_page if next_page else None
+            if next_page:
+                if next_page.startswith("/"):
+                    url = f"{api_config.base_url}{next_page}"
+                else:
+                    url = next_page
+            else:
+                url = None
 
             logger.info(f"[REST {endpoint}] +{len(items)} (total: {len(all_items)})")
 
