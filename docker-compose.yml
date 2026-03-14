@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-goszakup}
       POSTGRES_USER: ${POSTGRES_USER:-goszakup}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_strong_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
@@ -34,7 +34,7 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-goszakup}
       POSTGRES_USER: ${POSTGRES_USER:-goszakup}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_strong_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       GOSZAKUP_API_TOKEN: ${GOSZAKUP_API_TOKEN:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://nitec-ai.kz/api}

@@ -28,7 +28,7 @@ class DBConfig:
     port: int = int(os.getenv("POSTGRES_PORT", "5432"))
     database: str = os.getenv("POSTGRES_DB", "goszakup")
     user: str = os.getenv("POSTGRES_USER", "goszakup")
-    password: str = os.getenv("POSTGRES_PASSWORD", "changeme_strong_password")
+    password: str = os.getenv("POSTGRES_PASSWORD", "")
 
     @property
     def dsn(self) -> str:
@@ -53,6 +53,8 @@ class LLMConfig:
 class AppConfig:
     port: int = int(os.getenv("APP_PORT", "8000"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    api_key: str = os.getenv("APP_API_KEY", "")  # if set, require X-API-Key header
+    cors_origins: str = os.getenv("CORS_ORIGINS", "")  # comma-separated, empty = same-origin only
 
 
 # Список БИНов организаций для выгрузки (из ТЗ — 27 организаций)

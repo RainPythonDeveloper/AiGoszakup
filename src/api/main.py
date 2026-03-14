@@ -4,8 +4,11 @@ REST API + WebSocket чат.
 """
 import json
 import logging
+import time
+import secrets
+from collections import defaultdict
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -22,76 +25,70 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# ============================================================
+# CORS — configurable via CORS_ORIGINS env var
+# ============================================================
+_cors_origins: list[str] = []
+if app_config.cors_origins:
+    _cors_origins = [o.strip() for o in app_config.cors_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
 # ============================================================
-# REST API Endpoints
+# Optional API Key auth (enabled when APP_API_KEY is set)
 # ============================================================
-
-@app.get("/api/health")
-async def health():
-    """Проверка работоспособности."""
-    overview = get_data_overview()
-    return {"status": "ok", "data": overview}
-
-
-@app.get("/api/overview")
-async def data_overview():
-    """Обзор загруженных данных."""
-    return get_data_overview()
-
-
-@app.post("/api/query")
-async def query_data(request: dict):
-    """Выполняет SQL запрос (только SELECT)."""
-    sql = request.get("query", "")
-    return execute_sql(sql)
-
-
-@app.post("/api/fair-price")
-async def fair_price(request: dict):
-    """Рассчитывает справедливую цену."""
-    enstru = request.get("enstru_code", "")
-    region = request.get("region")
-    return get_fair_price(enstru, region)
-
-
-@app.post("/api/chat")
-async def chat_endpoint(request: dict):
-    """REST endpoint для чата с AI агентом."""
-    message = request.get("message", "")
-    if not message:
-        return {"error": "message is required"}
-
-    agent = get_agent()
-    response = await agent.chat(message)
-    return {"response": response}
+async def verify_api_key(request: Request):
+    """If APP_API_KEY is configured, require X-API-Key header."""
+    if not app_config.api_key:
+        return  # auth disabled — open access
+    key = request.headers.get("X-API-Key", "")
+    if not secrets.compare_digest(key, app_config.api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 # ============================================================
-# WebSocket Chat
+# WebSocket rate limiter
 # ============================================================
+_MAX_WS_CONNECTIONS = 50
+_WS_MSG_PER_MINUTE = 20
+
 
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
         self.agents: dict[str, ReActAgent] = {}
+        self._msg_timestamps: dict[str, list[float]] = defaultdict(list)
 
-    async def connect(self, websocket: WebSocket, client_id: str):
+    async def connect(self, websocket: WebSocket, client_id: str) -> bool:
+        if len(self.active_connections) >= _MAX_WS_CONNECTIONS:
+            await websocket.close(code=1013, reason="Too many connections")
+            return False
         await websocket.accept()
         self.active_connections[client_id] = websocket
         self.agents[client_id] = ReActAgent()
+        return True
 
     def disconnect(self, client_id: str):
         self.active_connections.pop(client_id, None)
         self.agents.pop(client_id, None)
+        self._msg_timestamps.pop(client_id, None)
+
+    def is_rate_limited(self, client_id: str) -> bool:
+        now = time.time()
+        timestamps = self._msg_timestamps[client_id]
+        # Keep only timestamps from last 60s
+        self._msg_timestamps[client_id] = [t for t in timestamps if now - t < 60]
+        if len(self._msg_timestamps[client_id]) >= _WS_MSG_PER_MINUTE:
+            return True
+        self._msg_timestamps[client_id].append(now)
+        return False
 
     async def send_message(self, client_id: str, message: dict):
         ws = self.active_connections.get(client_id)
@@ -107,10 +104,70 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+# ============================================================
+# REST API Endpoints
+# ============================================================
+
+@app.get("/api/health")
+async def health():
+    """Проверка работоспособности."""
+    overview = get_data_overview()
+    return {"status": "ok", "data": overview}
+
+
+@app.get("/api/overview", dependencies=[Depends(verify_api_key)])
+async def data_overview():
+    """Обзор загруженных данных."""
+    return get_data_overview()
+
+
+@app.post("/api/query", dependencies=[Depends(verify_api_key)])
+async def query_data(request: dict):
+    """Выполняет SQL запрос (только SELECT)."""
+    sql = request.get("query", "")
+    return execute_sql(sql)
+
+
+@app.post("/api/fair-price", dependencies=[Depends(verify_api_key)])
+async def fair_price(request: dict):
+    """Рассчитывает справедливую цену."""
+    enstru = request.get("enstru_code", "")
+    region = request.get("region")
+    return get_fair_price(enstru, region)
+
+
+@app.post("/api/chat", dependencies=[Depends(verify_api_key)])
+async def chat_endpoint(request: dict):
+    """REST endpoint для чата с AI агентом."""
+    message = request.get("message", "")
+    if not message:
+        return {"error": "message is required"}
+
+    agent = get_agent()
+    try:
+        response = await agent.chat(message)
+        return {"response": response}
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        return {"error": "Внутренняя ошибка сервера. Попробуйте позже."}
+
+
+# ============================================================
+# WebSocket Chat
+# ============================================================
+
 @app.websocket("/ws/chat/{client_id}")
 async def websocket_chat(websocket: WebSocket, client_id: str):
     """WebSocket endpoint для real-time чата."""
-    await manager.connect(websocket, client_id)
+    # Validate client_id length to prevent abuse
+    if not client_id or len(client_id) > 64:
+        await websocket.close(code=1008, reason="Invalid client_id")
+        return
+
+    connected = await manager.connect(websocket, client_id)
+    if not connected:
+        return
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -118,6 +175,14 @@ async def websocket_chat(websocket: WebSocket, client_id: str):
             user_text = message.get("message", "")
 
             if not user_text:
+                continue
+
+            # Rate limiting
+            if manager.is_rate_limited(client_id):
+                await manager.send_message(client_id, {
+                    "type": "error",
+                    "content": "Слишком много запросов. Подождите минуту.",
+                })
                 continue
 
             # Отправляем индикатор "думает"
@@ -138,7 +203,7 @@ async def websocket_chat(websocket: WebSocket, client_id: str):
                 logger.error(f"Agent error: {e}")
                 await manager.send_message(client_id, {
                     "type": "error",
-                    "content": f"Ошибка: {str(e)}",
+                    "content": "Произошла ошибка при обработке запроса. Попробуйте ещё раз.",
                 })
 
     except WebSocketDisconnect:
@@ -214,7 +279,8 @@ async def chat_ui():
 
 <script>
     const clientId = 'user_' + Math.random().toString(36).substr(2, 9);
-    const ws = new WebSocket(`ws://${location.host}/ws/chat/${clientId}`);
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${clientId}`);
     const chat = document.getElementById('chat');
     const input = document.getElementById('input');
     const btn = document.getElementById('btn');
