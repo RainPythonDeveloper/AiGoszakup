@@ -27,6 +27,7 @@ class FairPriceResult:
     median_price: float
     regional_coeff: float
     inflation_index: float
+    seasonal_coeff: float    # сезонный коэффициент (квартальный)
     confidence: str          # 'high', 'medium', 'low'
     sample_size: int
     q1: float | None
@@ -86,10 +87,13 @@ def calculate_fair_price(
         # 3. Индекс инфляции (ИПЦ)
         inflation_idx = _get_inflation_index(conn, target_date)
 
-        # 4. Формула Fair Price
-        fair_price = median_price * regional_coeff * inflation_idx
+        # 4. Сезонный коэффициент (квартальный)
+        seasonal_coeff = _get_seasonal_coefficient(conn, enstru_code, target_date)
 
-        # 5. Уровень доверия
+        # 5. Формула Fair Price = Median × RegCoeff × CPI × SeasonCoeff
+        fair_price = median_price * regional_coeff * inflation_idx * seasonal_coeff
+
+        # 6. Уровень доверия
         if sample_size >= 30:
             confidence = 'high'
         elif sample_size >= 10:
@@ -104,6 +108,7 @@ def calculate_fair_price(
             median_price=round(median_price, 2),
             regional_coeff=round(regional_coeff, 4),
             inflation_index=round(inflation_idx, 4),
+            seasonal_coeff=round(seasonal_coeff, 4),
             confidence=confidence,
             sample_size=sample_size,
             q1=round(q1, 2) if q1 else None,
@@ -211,6 +216,57 @@ def _get_inflation_index(conn, target_date: date) -> float:
 
     if nearest and base and base[0] > 0:
         return float(nearest[0]) / float(base[0])
+
+    return 1.0
+
+
+def _get_seasonal_coefficient(conn, enstru_code: str, target_date: date) -> float:
+    """
+    Вычисляет сезонный коэффициент на основе исторических данных.
+
+    Сравнивает медиану цен за целевой квартал с общей годовой медианой
+    для данного ENSTRU кода. Например, стройматериалы летом дороже.
+
+    Returns:
+        Коэффициент > 1.0 если квартал дороже среднего, < 1.0 если дешевле.
+        1.0 если данных недостаточно.
+    """
+    quarter = (target_date.month - 1) // 3 + 1  # 1..4
+
+    with conn.cursor() as cur:
+        # Медиана за целевой квартал по всем годам
+        cur.execute("""
+            SELECT
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cs.price_per_unit) AS quarter_median,
+                COUNT(*) AS quarter_count
+            FROM contract_subjects cs
+            JOIN contracts c ON cs.contract_id = c.id
+            WHERE cs.enstru_code = %s
+              AND cs.price_per_unit > 0
+              AND EXTRACT(QUARTER FROM c.sign_date) = %s
+        """, (enstru_code, quarter))
+        q_row = cur.fetchone()
+
+        # Общая медиана по всем кварталам
+        cur.execute("""
+            SELECT
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cs.price_per_unit) AS annual_median,
+                COUNT(*) AS annual_count
+            FROM contract_subjects cs
+            JOIN contracts c ON cs.contract_id = c.id
+            WHERE cs.enstru_code = %s
+              AND cs.price_per_unit > 0
+        """, (enstru_code,))
+        a_row = cur.fetchone()
+
+    if (q_row and a_row
+            and q_row[0] and a_row[0]
+            and float(a_row[0]) > 0
+            and int(q_row[1] or 0) >= 5
+            and int(a_row[1] or 0) >= 20):
+        coeff = float(q_row[0]) / float(a_row[0])
+        # Ограничиваем диапазон: 0.7 .. 1.5 (±50% от нормы)
+        return max(0.7, min(1.5, coeff))
 
     return 1.0
 

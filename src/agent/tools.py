@@ -16,11 +16,26 @@ from src.analytics.anomaly_detector import (
     detect_iqr_anomalies,
     detect_iforest_anomalies,
     detect_consensus_anomalies,
-    detect_volume_anomalies,
+    detect_volume_anomalies as _detect_volume_anomalies,
     detect_supplier_concentration,
 )
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# Portal URL helpers
+# ============================================================
+PORTAL_BASE = "https://goszakup.gov.kz/ru"
+
+
+def announcement_url(number_anno: str) -> str:
+    """Ссылка на объявление на портале госзакупок."""
+    return f"{PORTAL_BASE}/announce/index/{number_anno}"
+
+
+def contract_url(contract_number: str) -> str:
+    """Ссылка на договор на портале госзакупок."""
+    return f"{PORTAL_BASE}/egContract/cpublic/show/{contract_number}"
 
 
 def get_conn():
@@ -131,6 +146,23 @@ TOOL_DEFINITIONS = [
         }
     },
     {
+        "name": "detect_volume_anomalies",
+        "description": (
+            "Выявляет аномальные объёмы закупок: нетипичное завышение количества ТРУ "
+            "по сравнению с предыдущими годами. Сравнивает годовой объём закупки "
+            "с средним за все годы для каждого (ENSTRU, заказчик)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "threshold": {
+                    "type": "number",
+                    "description": "Множитель порога (по умолчанию 2.0 — объём в 2+ раза больше среднего)"
+                }
+            }
+        }
+    },
+    {
         "name": "get_data_overview",
         "description": (
             "Возвращает общую статистику по загруженным данным: "
@@ -180,6 +212,11 @@ def execute_sql(query: str) -> dict:
                     clean_row[key] = None
                 else:
                     clean_row[key] = val
+            # Добавляем прямые ссылки на портал госзакупок
+            if "number_anno" in clean_row and clean_row["number_anno"]:
+                clean_row["portal_url"] = announcement_url(str(clean_row["number_anno"]))
+            if "contract_number" in clean_row and clean_row["contract_number"]:
+                clean_row["portal_url"] = contract_url(str(clean_row["contract_number"]))
             result_rows.append(clean_row)
 
         return {
@@ -204,9 +241,11 @@ def get_fair_price(enstru_code: str, region: str | None = None) -> dict:
         "enstru_code": result.enstru_code,
         "region": result.region,
         "fair_price": result.fair_price,
+        "formula": "FairPrice = Median × RegCoeff × CPI × SeasonCoeff",
         "median_price": result.median_price,
         "regional_coefficient": result.regional_coeff,
         "inflation_index": result.inflation_index,
+        "seasonal_coefficient": result.seasonal_coeff,
         "confidence": result.confidence,
         "sample_size": result.sample_size,
         "price_range": {
@@ -270,6 +309,19 @@ def check_supplier_concentration(customer_bin: str | None = None,
         conn.close()
 
 
+def detect_volume_anomalies_tool(threshold: float = 2.0) -> dict:
+    """Выявляет аномальные объёмы закупок по годам."""
+    conn = get_conn()
+    try:
+        results = _detect_volume_anomalies(conn, year_threshold=threshold)
+        return {
+            "total": len(results),
+            "anomalies": sorted(results, key=lambda x: x.get('ratio', 0), reverse=True)[:50],
+        }
+    finally:
+        conn.close()
+
+
 def get_data_overview() -> dict:
     """Возвращает обзор данных."""
     conn = get_conn()
@@ -297,6 +349,7 @@ TOOL_MAP = {
     "execute_sql": execute_sql,
     "get_fair_price": get_fair_price,
     "detect_anomalies": detect_anomalies,
+    "detect_volume_anomalies": detect_volume_anomalies_tool,
     "check_supplier_concentration": check_supplier_concentration,
     "get_data_overview": get_data_overview,
 }
